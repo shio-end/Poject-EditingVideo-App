@@ -64,6 +64,7 @@ public final class EditorActivity extends Activity {
     private static final int MUTED = 0xffc2bad8;
     private static final int ACCENT = 0xffbca9ff;
     private static final int MIN_CLIP_MS = 100;
+    private static final long EXPORT_STALL_TIMEOUT_MS = 60_000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService storage = Executors.newSingleThreadExecutor();
@@ -435,6 +436,7 @@ public final class EditorActivity extends Activity {
                             .build())
                     .build();
             transformer = new Transformer.Builder(this)
+                    .setMaxDelayBetweenMuxerSamplesMs(EXPORT_STALL_TIMEOUT_MS)
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
                     .addListener(new Transformer.Listener() {
@@ -447,6 +449,7 @@ public final class EditorActivity extends Activity {
 
                         @Override
                         public void onError(Composition composition, ExportResult result, ExportException error) {
+                            android.util.Log.w("VeloraNova", "Export failed: " + error.getErrorCodeName());
                             failExport("ส่งออกไม่ได้ ลองเลือกวิดีโอ MP4 ช่วงอื่น");
                         }
                     })

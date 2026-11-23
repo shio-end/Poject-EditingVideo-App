@@ -1,0 +1,94 @@
+name: VeloraNova large APK test
+
+on:
+  push:
+    branches: [veloranova-apk-size-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          sdk="$RUNNER_TEMP/veloranova-android-sdk"
+          mkdir -p "$sdk/cmdline-tools"
+          curl -fsSL --retry 3 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/android-tools.zip"
+          unzip -q "$RUNNER_TEMP/android-tools.zip" -d "$sdk/cmdline-tools"
+          manager="$sdk/cmdline-tools/cmdline-tools/bin/sdkmanager"
+          (set +o pipefail; yes | "$manager" --sdk_root="$sdk" --licenses)
+          "$manager" --sdk_root="$sdk" 'platforms;android-35' 'build-tools;34.0.0' 'build-tools;35.0.0'
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+      - name: Generate synthetic assets
+        working-directory: veloranova
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from random import Random
+
+          assets = Path('app/src/main/assets/size-test')
+          assets.mkdir(parents=True, exist_ok=True)
+          generator = Random(294)
+          total_bytes = 284_000_000
+          count = 5_437
+          size, remainder = divmod(total_bytes, count)
+          for index in range(count):
+              path = assets / f'chunk-{index:05d}.bin'
+              path.write_bytes(generator.randbytes(size + (index < remainder)))
+          print(f'Generated {count:,} synthetic assets totaling {total_bytes:,} bytes.')
+          PY
+      - name: Build signed debug APK
+        working-directory: veloranova
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK size, payload, and signature
+        working-directory: veloranova
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose "$apk"
+          "$tools/aapt" dump badging "$apk" | sed -n '/^package:/p; /^application-label:/p'
+          "$tools/aapt" dump permissions "$apk" | tee "$RUNNER_TEMP/apk-permissions.txt"
+          if grep -Fq 'android.permission.INTERNET' "$RUNNER_TEMP/apk-permissions.txt"; then
+            exit 1
+          fi
+          python3 - "$apk" <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import sys
+
+          apk = Path(sys.argv[1])
+          size = apk.stat().st_size
+          with ZipFile(apk) as package:
+              assets = [entry for entry in package.infolist()
+                        if entry.filename.startswith('assets/size-test/') and not entry.is_dir()]
+          assert len(assets) == 5_437
+          assert sum(entry.file_size for entry in assets) == 284_000_000
+          assert 290_000_000 <= size <= 305_000_000, size
+          print(f'APK verified: {size:,} bytes with {len(assets):,} synthetic assets.')
+          PY
+          cp "$apk" "$RUNNER_TEMP/VeloraNova-Size-Test.apk"
+          bytes=$(stat -c %s "$apk")
+          printf 'APK size: %s bytes\n\nSynthetic files: 5,437\n' "$bytes" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VeloraNova-Size-Test
+          path: ${{ runner.temp }}/VeloraNova-Size-Test.apk
+          compression-level: 0
+          if-no-files-found: error

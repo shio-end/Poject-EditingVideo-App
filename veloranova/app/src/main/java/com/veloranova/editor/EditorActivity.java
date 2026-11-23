@@ -1,10 +1,13 @@
 package com.veloranova.editor;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.res.ColorStateList;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -13,15 +16,19 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
+import android.text.InputFilter;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.VideoView;
 
@@ -29,8 +36,10 @@ import androidx.annotation.OptIn;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.effect.OverlayEffect;
 import androidx.media3.transformer.Composition;
 import androidx.media3.transformer.EditedMediaItem;
+import androidx.media3.transformer.Effects;
 import androidx.media3.transformer.ExportException;
 import androidx.media3.transformer.ExportResult;
 import androidx.media3.transformer.Transformer;
@@ -40,6 +49,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -64,6 +74,12 @@ public final class EditorActivity extends Activity {
     private TextView status;
     private TextView startLabel;
     private TextView endLabel;
+    private Button captionButton;
+    private View captionPreview;
+    private MotionCaption caption;
+    private int captionPosition;
+    private final Paint captionFilter = new Paint(Paint.FILTER_BITMAP_FLAG);
+
     private Button choose;
     private Button play;
     private Button save;
@@ -86,8 +102,10 @@ public final class EditorActivity extends Activity {
             if (video.isPlaying() && video.getCurrentPosition() >= end) {
                 pausePreview();
                 video.seekTo(start);
+                showCaptionAt(start);
                 return;
             }
+            showCaptionAt(video.getCurrentPosition());
             handler.postDelayed(this, 35);
         }
     };
@@ -100,6 +118,10 @@ public final class EditorActivity extends Activity {
         buildLayout();
         refreshControls();
         if (state != null && state.getString("clip") != null) {
+            String savedCaption = state.getString("caption");
+            if (savedCaption != null) {
+                caption = new MotionCaption(savedCaption, state.getInt("from"), state.getInt("to"));
+            }
             openClip(Uri.parse(state.getString("clip")), state.getInt("start"), state.getInt("end"));
         }
     }
@@ -143,6 +165,21 @@ public final class EditorActivity extends Activity {
         placeholder.setGravity(Gravity.CENTER);
         preview.addView(placeholder, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        captionPreview = new View(this) {
+            @Override
+            protected void onDraw(Canvas canvas) {
+                if (duration <= 0 || caption == null || end <= start) {
+                    return;
+                }
+                int saved = canvas.save();
+                canvas.translate(video.getLeft(), video.getTop());
+                caption.drawPreview(canvas, video.getWidth(), video.getHeight(),
+                        (float) (captionPosition - start) / (end - start), captionFilter);
+                canvas.restoreToCount(saved);
+            }
+        };
+        preview.addView(captionPreview, new FrameLayout.LayoutParams(-1, -1));
+        video.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> captionPreview.invalidate());
         play = button("เล่นช่วงที่เลือก", false);
         play.setOnClickListener(view -> togglePreview());
         add(page, play, 8);
@@ -160,6 +197,10 @@ public final class EditorActivity extends Activity {
         add(timeline, endLabel, 4);
         add(timeline, endSlider, 0);
 
+        captionButton = button("เพิ่มเลเยอร์ข้อความ", false);
+        captionButton.setOnClickListener(view -> editCaption());
+        add(page, captionButton, 12);
+
         save = button("บันทึก MP4", true);
         save.setOnClickListener(view -> exportClip());
         add(page, save, 14);
@@ -171,6 +212,57 @@ public final class EditorActivity extends Activity {
         status = text("", 14, MUTED);
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         add(page, status, 8);
+    }
+
+    private void showCaptionAt(int position) {
+        captionPosition = position;
+        captionPreview.invalidate();
+    }
+
+    private Spinner positionPicker(LinearLayout panel, String label, int selection) {
+        add(panel, text(label, 14, MUTED), 10);
+        Spinner spinner = new Spinner(this);
+        spinner.setContentDescription(label);
+        ArrayAdapter<String> choices = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, new String[] {"ด้านบน", "กึ่งกลาง", "ด้านล่าง"});
+        choices.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(choices);
+        spinner.setSelection(selection);
+        add(panel, spinner, 4);
+        return spinner;
+    }
+
+    private void editCaption() {
+        pausePreview();
+        LinearLayout panel = column();
+        panel.setPadding(dp(24), dp(8), dp(24), dp(8));
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("ข้อความบนวิดีโอ");
+        input.setFilters(new InputFilter[] {new InputFilter.LengthFilter(100)});
+        if (caption != null) {
+            input.setText(caption.text);
+        }
+        add(panel, input, 0);
+        Spinner from = positionPicker(panel, "ตำแหน่งเมื่อเริ่ม", caption == null ? 2 : caption.from);
+        Spinner to = positionPicker(panel, "ตำแหน่งเมื่อจบ", caption == null ? 1 : caption.to);
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("เลเยอร์ข้อความ")
+                .setView(panel).setNegativeButton("ยกเลิก", null)
+                .setPositiveButton("ใช้ข้อความ", (d, id) -> {
+                    String value = input.getText().toString().trim();
+                    caption = value.isEmpty() ? null : new MotionCaption(value,
+                            from.getSelectedItemPosition(), to.getSelectedItemPosition());
+                    video.seekTo(start);
+                    showCaptionAt(start);
+                    refreshControls();
+                });
+        if (caption != null) {
+            dialog.setNeutralButton("ลบข้อความ", (d, id) -> {
+                caption = null;
+                refreshControls();
+            });
+        }
+        dialog.show();
     }
 
     private void chooseClip() {
@@ -196,6 +288,7 @@ public final class EditorActivity extends Activity {
             status.setText("กรุณาเลือกไฟล์วิดีโอจากเครื่อง");
             return;
         }
+        caption = null;
         openClip(selected, 0, -1);
     }
 
@@ -224,11 +317,13 @@ public final class EditorActivity extends Activity {
                 status.setText("");
             }
             video.seekTo(resumePosition);
+            showCaptionAt(resumePosition);
             refreshControls();
         });
         video.setOnCompletionListener(player -> {
             pausePreview();
             video.seekTo(start);
+            showCaptionAt(start);
         });
         video.setOnErrorListener((player, what, extra) -> {
             resetClip("เปิดวิดีโอนี้ไม่ได้ ลองเลือกไฟล์ MP4 จากเครื่อง");
@@ -262,9 +357,11 @@ public final class EditorActivity extends Activity {
                 if (isStart) {
                     start = Math.min(value, end - minimum);
                     video.seekTo(start);
+                    showCaptionAt(start);
                 } else {
                     end = Math.max(value, start + minimum);
                     video.seekTo(Math.max(start, end - 1));
+                    showCaptionAt(end - 1);
                 }
                 refreshControls();
             }
@@ -285,6 +382,7 @@ public final class EditorActivity extends Activity {
         }
         if (video.getCurrentPosition() < start || video.getCurrentPosition() >= end - 40) {
             video.seekTo(start);
+            showCaptionAt(start);
         }
         video.start();
         play.setText("หยุดชั่วคราว");
@@ -301,10 +399,12 @@ public final class EditorActivity extends Activity {
     private void refreshControls() {
         boolean ready = duration > 0;
         choose.setEnabled(!busy);
-        for (View control : new View[] {play, save, startSlider, endSlider}) {
+        for (View control : new View[] {play, save, captionButton, startSlider, endSlider}) {
             control.setEnabled(ready && !busy);
             control.setAlpha(ready && !busy ? 1f : 0.55f);
         }
+        captionButton.setText(caption == null ? "เพิ่มเลเยอร์ข้อความ" : "แก้ไขเลเยอร์ข้อความ");
+        captionPreview.invalidate();
         placeholder.setVisibility(ready ? View.GONE : View.VISIBLE);
         video.setVisibility(ready || clip != null ? View.VISIBLE : View.INVISIBLE);
         startSlider.setMax(duration);
@@ -351,7 +451,13 @@ public final class EditorActivity extends Activity {
                         }
                     })
                     .build();
-            transformer.start(new EditedMediaItem.Builder(media).build(), output.getAbsolutePath());
+            EditedMediaItem.Builder edit = new EditedMediaItem.Builder(media);
+            if (caption != null) {
+                OverlayEffect effect = new OverlayEffect(Collections.singletonList(
+                        caption.exportOverlay((long) (end - start) * 1000)));
+                edit.setEffects(new Effects(Collections.emptyList(), Collections.singletonList(effect)));
+            }
+            transformer.start(edit.build(), output.getAbsolutePath());
         } catch (IOException | RuntimeException error) {
             failExport("เริ่มส่งออกไม่ได้ ตรวจสอบไฟล์และพื้นที่จัดเก็บ");
         }
@@ -432,6 +538,7 @@ public final class EditorActivity extends Activity {
         super.onResume();
         if (duration > 0) {
             video.seekTo(resumePosition);
+            showCaptionAt(resumePosition);
         }
     }
 
@@ -445,6 +552,11 @@ public final class EditorActivity extends Activity {
     @Override
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
+        if (caption != null) {
+            state.putString("caption", caption.text);
+            state.putInt("from", caption.from);
+            state.putInt("to", caption.to);
+        }
         if (clip != null) {
             state.putString("clip", clip.toString());
             state.putInt("start", start);
